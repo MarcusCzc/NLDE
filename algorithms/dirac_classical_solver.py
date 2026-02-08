@@ -268,7 +268,7 @@ def run_single_case(lambda1: float, lambda2: float, n: int = 6, num_steps: int =
     dt = total_time / num_steps
 
     # ========== 初始化求解器和初始条件 ==========
-    solver = DiracClassicalSolver(n=n, lambda1=lambda1, lambda2=lambda2, dt=dt)
+    solver = DiracClassicalSolver(n=n, m=m, lambda1=lambda1, lambda2=lambda2, dt=dt)
     x = solver.x
     
     Psi0_init, Psi1_init = dirac_initial_condition(x, x0, sigma, k0, m)
