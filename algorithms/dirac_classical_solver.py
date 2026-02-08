@@ -50,8 +50,8 @@ class DiracClassicalSolver:
     
     算法步骤：
     1. 线性步（伪谱方法）：
-       - 应用 β 项（在位置空间）
-       - 应用 α 项（在动量空间）
+       - FFT 到动量空间 → 应用 α 项（exp(-iαkΔt)）
+       - IFFT 回位置空间 → 应用 β 项（exp(-iβmΔt)）
     2. 非线性 Euler 步
     """
 
@@ -76,8 +76,8 @@ class DiracClassicalSolver:
         Ψ_new = exp(-iβmΔt) * F^{-1}[ exp(-iαkΔt) * F[Ψ] ]
     
         该格式分裂为两个可精确计算的子步：
-        1. 动量空间：exp(-iαkΔt) 作用 (α = σ_x，在动量空间是对角化的)
-        2. 位置空间：exp(-iβmΔt) 作用 (β = σ_z，在位置空间是对角化的)
+        1. FFT 到动量空间 → 应用 exp(-iαkΔt) (α = σ_x，在动量空间是对角化的)
+        2. IFFT 回位置空间 → 应用 exp(-iβmΔt) (β = σ_z，在位置空间是对角化的)
     
         Args:
             Psi0: 上自旋分量波函数 (位置空间)
