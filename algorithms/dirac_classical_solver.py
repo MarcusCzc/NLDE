@@ -1,7 +1,8 @@
 """
-经典伪谱分裂步法求解非线性Dirac方程
+经典伪谱分裂步法求解非线性 Dirac 方程
 """
 
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Tuple
@@ -12,38 +13,40 @@ def dirac_initial_condition(
     x: NDArray[np.floating],
     x0: float = 0.0,
     sigma: float = 1.0,
-    k0: float = 5.0
+    k0: float = 5.0,
+    m: float = 1.0
 ) -> Tuple[NDArray[np.complexfloating], NDArray[np.complexfloating]]:
     """
-    Dirac方程的初始条件：高斯波包
-    
-    Args:
-        x: 空间位置数组
-        x0: 波包中心位置
-        sigma: 波包宽度
-        k0: 初始动量
-    
-    Returns:
-        (Psi0, Psi1): 两个自旋分量
+    Dirac 正能量高斯波包初始条件（适合伪谱法）
     """
-    # 高斯波包
-    envelope = np.exp(-((x - x0)**2) / (2*sigma**2)) * np.exp(1j*k0*x)
-    
-    # 归一化因子
-    norm = np.sqrt(np.sum(np.abs(envelope)**2) * (x[1] - x[0]))
-    envelope /= norm
-    
-    # 上自旋分量
-    Psi0 = envelope
-    # 下自旋分量
-    Psi1 = 0.5 * envelope
-    
-    return Psi0, Psi1
+
+    dx = x[1] - x[0]
+
+    # 空间包络
+    g = np.exp(-((x - x0)**2) / (2*sigma**2))
+
+    # 动量相位
+    phase = np.exp(1j * k0 * x)
+
+    # Dirac 正能量自旋子
+    E0 = np.sqrt(k0**2 + m**2)
+    u0 = np.sqrt((E0 + m) / (2 * E0))
+    u1 = np.sign(k0) * np.sqrt((E0 - m) / (2 * E0))
+
+    Psi0 = u0 * g * phase
+    Psi1 = u1 * g * phase
+
+    # L2 归一化
+    norm = np.sqrt(np.sum(np.abs(Psi0)**2 + np.abs(Psi1)**2) * dx)
+    Psi0 /= norm
+    Psi1 /= norm
+
+    return Psi0.astype(np.complex128), Psi1.astype(np.complex128)
 
 
 class DiracClassicalSolver:
     """
-    经典伪谱分裂步算法求解非线性Dirac方程
+    经典伪谱分裂步算法求解非线性 Dirac 方程
     
     算法步骤：
     1. 线性步（伪谱方法）：
@@ -52,71 +55,94 @@ class DiracClassicalSolver:
     2. 非线性 Euler 步
     """
 
-    def __init__(self, n: int = 5, lambda1: float = 1.0, lambda2: float = 0.5, dt: float = 0.01):
+    def __init__(self, n: int = 6, m: float = 1.0, lambda1: float = 1.0, lambda2: float = 0.5, dt: float = 0.01):
         self.n = n
         self.N = 2**n
+        self.m = m
         self.lambda1 = lambda1
         self.lambda2 = lambda2
         self.dt = dt
-        
+
         # 空间网格：x ∈ [-π, π)
         self.x = np.linspace(-np.pi, np.pi, self.N, endpoint=False)
         self.dx = self.x[1] - self.x[0]
-        
+
         # 波数：k_j = -N/2 + j, j = 0, ..., N-1
         self.k = np.arange(-self.N//2, self.N//2)
 
     def linear_step(self, Psi0: NDArray, Psi1: NDArray) -> Tuple[NDArray, NDArray]:
         """
-        应用线性演化步骤
-        
-        对应公式(4)中的线性项：
-        - β 项：exp(-i*β*dt)
-        - α 项：exp(-i*α*k*dt)（在动量空间）
-        
+        线性演化步骤 - 严格实现论文公式(4):
+        Ψ_new = exp(-iβmΔt) * F^{-1}[ exp(-iαkΔt) * F[Ψ] ]
+    
+        该格式分裂为两个可精确计算的子步：
+        1. 动量空间：exp(-iαkΔt) 作用 (α = σ_x，在动量空间是对角化的)
+        2. 位置空间：exp(-iβmΔt) 作用 (β = σ_z，在位置空间是对角化的)
+    
         Args:
-            Psi0: 上自旋分量
-            Psi1: 下自旋分量
-        
+            Psi0: 上自旋分量波函数 (位置空间)
+            Psi1: 下自旋分量波函数 (位置空间)
+    
         Returns:
-            (Psi0_new, Psi1_new): 演化后的两个自旋分量
+            Psi0_new: 演化后的上自旋分量
+            Psi1_new: 演化后的下自旋分量
         """
-        # --- Step 1: 应用 β 项（在位置空间）---
-        # β = σ_z = diag(1, -1)
-        # exp(-i*β*dt) = diag(exp(-i*dt), exp(i*dt))
-        Psi0_temp = Psi0 * np.exp(-1j * self.dt)
-        Psi1_temp = Psi1 * np.exp(1j * self.dt)
+
+        # 获取系统参数：格点数 N 和时间步长 Δt
+        N, dt = self.N, self.dt
+
+        # 波数数组 k：预计算好的整数波数 [-N/2, -N/2+1, ..., N/2-1]
+        k = self.k  
         
-        # --- Step 2: 应用 α 项（在动量空间）---
-        # α = σ_x，在动量空间变为旋转
-        
-        # FFT到动量空间
-        Psi0_k = np.fft.fftshift(np.fft.fft(Psi0_temp))
-        Psi1_k = np.fft.fftshift(np.fft.fft(Psi1_temp))
-        
-        # 在动量空间应用 α 算符
-        # exp(-i*α*k*dt) = cos(k*dt)*I - i*sin(k*dt)*σ_x
-        Psi0_k_new = np.zeros_like(Psi0_k)
-        Psi1_k_new = np.zeros_like(Psi1_k)
-        
-        for j in range(self.N):
-            k = self.k[j]
-            cos_term = np.cos(k * self.dt)
-            sin_term = np.sin(k * self.dt)
-            
-            # 应用旋转矩阵
-            Psi0_k_new[j] = cos_term * Psi0_k[j] - 1j * sin_term * Psi1_k[j]
-            Psi1_k_new[j] = -1j * sin_term * Psi0_k[j] + cos_term * Psi1_k[j]
-        
-        # 相位校正
-        correction = np.exp(1j * self.dt * (self.N//2))
-        Psi0_k_new *= correction
-        Psi1_k_new *= correction
-        
-        # IFFT回位置空间
-        Psi0_new = np.fft.ifft(np.fft.ifftshift(Psi0_k_new))
-        Psi1_new = np.fft.ifft(np.fft.ifftshift(Psi1_k_new))
-        
+        # 获取质量
+        m = self.m
+
+        # --- 步骤 1: 傅里叶变换到动量空间 ---
+        # 1.1 执行 FFT 将波函数变换到动量空间
+        #     标准 FFT 返回的波数顺序是 [0, 1, ..., N/2-1, -N/2, ..., -1]
+        Psi0_k = np.fft.fft(Psi0)
+        Psi1_k = np.fft.fft(Psi1)
+
+        # 1.2 使用 fftshift 将波数重新排序为对称顺序
+        #     顺序变为 [-N/2, -N/2+1, ..., -1, 0, 1, ..., N/2-1]
+        Psi0_k = np.fft.fftshift(Psi0_k)
+        Psi1_k = np.fft.fftshift(Psi1_k)
+
+        # --- 步骤 2: 动量空间演化 exp(-iαkΔt) ---
+        # 2.1 计算旋转矩阵的三角函数系数
+        #     对于每个波数 k，我们需要计算 exp(-iσ_x·kΔt)
+        #     矩阵指数展开：exp(-iσ_x·kΔt) = cos(kΔt)·I - i·sin(kΔt)·σ_x
+        coskt = np.cos(k * dt)  # 单位矩阵系数
+        sinkt = np.sin(k * dt)  # σ_x 矩阵系数
+
+        # 2.2 应用 2×2 旋转矩阵到每个动量模式
+        #     [ Ψ0_k_new ]   [  cos(kΔt)   -i·sin(kΔt) ] [ Ψ0_k ]
+        #     [ Ψ1_k_new ] = [ -i·sin(kΔt)   cos(kΔt)   ] [ Ψ1_k ]
+        #     这是对每个 k 的独立 2×2 矩阵乘法
+        Psi0_k_new = coskt * Psi0_k - 1j * sinkt * Psi1_k
+        Psi1_k_new = -1j * sinkt * Psi0_k + coskt * Psi1_k
+
+        # --- 步骤 3: 逆傅里叶变换回位置空间 ---
+        # 3.1 使用 ifftshift 将波数顺序恢复为标准 FFT 顺序
+        #     从对称顺序变回 [0, 1, ..., N/2-1, -N/2, ..., -1]
+        Psi0_k_new = np.fft.ifftshift(Psi0_k_new)
+        Psi1_k_new = np.fft.ifftshift(Psi1_k_new)
+
+        # 3.2 执行逆 FFT，返回位置空间波函数
+        Psi0_tmp = np.fft.ifft(Psi0_k_new)
+        Psi1_tmp = np.fft.ifft(Psi1_k_new)
+
+        # --- 步骤 4: 位置空间演化 exp(-iβΔt) ---
+        # 4.1 β = σ_z = diag(1, -1)，所以 exp(-iβΔt) 是对角矩阵
+        #     exp(-iσ_z·Δt) = diag( exp(-iΔt), exp(iΔt) )
+        #     因为 σ_z 的特征值是 +1 和 -1
+        # 4.2 分别对两个分量应用相位旋转
+        #     上分量（对应 σ_z 特征值 +1）：乘以 exp(-iΔt)
+        #     下分量（对应 σ_z 特征值 -1）：乘以 exp(+iΔt)
+        Psi0_new = Psi0_tmp * np.exp(-1j * m * dt)
+        Psi1_new = Psi1_tmp * np.exp(+1j * m * dt)
+
+        # 返回演化后的波函数
         return Psi0_new, Psi1_new
 
     def nonlinear_step(self, Psi0: NDArray, Psi1: NDArray) -> Tuple[NDArray, NDArray]:
@@ -132,28 +158,29 @@ class DiracClassicalSolver:
         Returns:
             (Psi0_new, Psi1_new): 演化后的两个自旋分量
         """
+
         # 计算局域密度
         rho = np.abs(Psi0)**2 + np.abs(Psi1)**2  # 总密度
         s_z = np.abs(Psi0)**2 - np.abs(Psi1)**2  # 自旋极化
-        
+
         # 非线性项（对应公式5和6）
         # F_j = I + i*dt*[(λ1*(ψ†βψ)β + λ2*‖ψ‖²*I)]
-        
+
         # 上自旋分量的非线性演化
         nonlinear_0 = 1j * self.dt * (
             self.lambda1 * s_z * Psi0 +  # β项对上自旋的贡献
-            self.lambda2 * rho * Psi0     # 标量项
+            self.lambda2 * rho * Psi0    # 标量项
         )
-        
+
         # 下自旋分量的非线性演化
         nonlinear_1 = 1j * self.dt * (
             -self.lambda1 * s_z * Psi1 +  # β项对下自旋的贡献（负号）
-            self.lambda2 * rho * Psi1      # 标量项
+            self.lambda2 * rho * Psi1     # 标量项
         )
-        
+
         Psi0_new = Psi0 + nonlinear_0
         Psi1_new = Psi1 + nonlinear_1
-        
+
         return Psi0_new, Psi1_new
 
     def step(self, Psi0: NDArray, Psi1: NDArray) -> Tuple[NDArray, NDArray]:
@@ -167,12 +194,13 @@ class DiracClassicalSolver:
         Returns:
             (Psi0_new, Psi1_new): 演化后的两个自旋分量
         """
+
         # 线性步
         Psi0_tilde, Psi1_tilde = self.linear_step(Psi0, Psi1)
-        
+
         # 非线性步
         Psi0_new, Psi1_new = self.nonlinear_step(Psi0_tilde, Psi1_tilde)
-        
+
         return Psi0_new, Psi1_new
 
     def propagate(
@@ -194,9 +222,10 @@ class DiracClassicalSolver:
         Returns:
             (Psi0_history, Psi1_history, times): 演化历史和时间数组
         """
+
         Psi0 = Psi0_init.copy()
         Psi1 = Psi1_init.copy()
-        
+
         save_indices = sorted(set(list(range(0, num_steps, save_every)) + [num_steps]))
         Psi0_history = []
         Psi1_history = []
@@ -216,104 +245,104 @@ class DiracClassicalSolver:
         return np.array(Psi0_history), np.array(Psi1_history), np.array(times)
 
 
-def run_simulation(output_dir: str = "/home/claude"):
+def run_single_case(lambda1: float, lambda2: float, n: int = 6, num_steps: int = 50):
     """
-    运行经典Dirac方程模拟
+    运行单个 lambda 组合的模拟
+    
+    Args:
+        lambda1: β 非线性系数
+        lambda2: 标量非线性系数
+        n: 网格大小参数 (2^n points)
+        num_steps: 时间步数
+    
+    Returns:
+        (x, Psi0_history, Psi1_history, times): 空间网格、波函数历史和时间数组
     """
+
     # ========== 参数设置 ==========
-    n = 5               # 2^5 = 32 points
     x0 = 0.0            # 初始位置
-    sigma = 1.0         # 波包宽度
+    sigma = 0.3           # 波包宽度
     k0 = 5.0            # 初始动量
-    lambda1 = 1.0       # β 非线性系数
-    lambda2 = 0.5       # 标量非线性系数
+    m = 1.0             # 质量参数
     total_time = 0.5
-    num_steps = 50
     dt = total_time / num_steps
 
     # ========== 初始化求解器和初始条件 ==========
     solver = DiracClassicalSolver(n=n, lambda1=lambda1, lambda2=lambda2, dt=dt)
     x = solver.x
     
-    Psi0_init, Psi1_init = dirac_initial_condition(x, x0, sigma, k0)
-
-    print(f"Starting classical Dirac simulation:")
-    print(f"  n={n}, N={solver.N}, dt={dt:.6f}, steps={num_steps}")
-    print(f"  Initial condition: x0={x0}, σ={sigma}, k0={k0}")
-    print(f"  Nonlinear: λ1={lambda1}, λ2={lambda2}")
+    Psi0_init, Psi1_init = dirac_initial_condition(x, x0, sigma, k0, m)
 
     # ========== 时间演化 ==========
     Psi0_history, Psi1_history, times = solver.propagate(
         Psi0_init, Psi1_init, num_steps, save_every=1
     )
 
-    print("Simulation completed!")
+    return x, Psi0_history, Psi1_history, times
 
-    # ========== 可视化 ==========
+
+def run_simulation(output_dir: str = "results"):
+    """
+    运行四个不同 lambda 组合的经典 Dirac 方程模拟，并绘制总概率密度分布
+    """
+
+    # ========== 参数设置 ==========
+    n = 8               # 2^8 = 256 points
+    num_steps = 50      # 总时间步数
+    time_steps_to_plot = [1, 10, 20, 40, 50]  # 要绘制的时间步
+
+    # 四个lambda组合
+    lambda_cases = [
+        (0.0, 0.0, "λ₁=0, λ₂=0"),
+        (0.0, 1.0, "λ₁=0, λ₂=1"),
+        (1.0, 0.0, "λ₁=1, λ₂=0"),
+        (1.0, 1.0, "λ₁=1, λ₂=1")
+    ]
+
+    print("Starting classical Dirac simulations for 4 lambda cases...")
+    print(f"  n={n}, N={2**n}, steps={num_steps}")
+    print(f"  Time steps to plot: {time_steps_to_plot}")
+
+    # ========== 运行所有四个案例 ==========
+    results = []
+    for lambda1, lambda2, label in lambda_cases:
+        print(f"\nRunning case: {label}")
+        x, Psi0_history, Psi1_history, times = run_single_case(
+            lambda1=lambda1, lambda2=lambda2, n=n, num_steps=num_steps
+        )
+        results.append((x, Psi0_history, Psi1_history, times, label))
+        print(f"  Case {label} completed!")
+
+    print("\nAll simulations completed!")
+
+    # ========== 可视化：四个子图 ==========
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
 
-    # 绘制自旋向上分量
-    ax = axes[0, 0]
-    for i in range(0, len(times), max(1, len(times)//6)):
-        ax.plot(x / np.pi, np.abs(Psi0_history[i, :])**2, label=f"t={times[i]:.2f}")
-    ax.set_xlabel("$x$ [$\\pi$]")
-    ax.set_ylabel("$|\\Psi_0|^2$")
-    ax.set_title("Spin-up component (Classical)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    for idx, (x, Psi0_history, Psi1_history, times, label) in enumerate(results):
+        ax = axes[idx]
 
-    # 绘制自旋向下分量
-    ax = axes[0, 1]
-    for i in range(0, len(times), max(1, len(times)//6)):
-        ax.plot(x / np.pi, np.abs(Psi1_history[i, :])**2, label=f"t={times[i]:.2f}")
-    ax.set_xlabel("$x$ [$\\pi$]")
-    ax.set_ylabel("$|\\Psi_1|^2$")
-    ax.set_title("Spin-down component (Classical)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+        # 从完整模拟结果中提取并绘制指定时间步的总概率密度
+        for step in time_steps_to_plot:
+            if step <= num_steps and step < len(times):
+                total_prob = np.abs(Psi0_history[step, :])**2 + np.abs(Psi1_history[step, :])**2
+                ax.plot(x / np.pi, total_prob, label=f"t={step}", linewidth=1.5)
 
-    # 绘制总概率密度
-    ax = axes[1, 0]
-    for i in range(0, len(times), max(1, len(times)//6)):
-        total_prob = np.abs(Psi0_history[i, :])**2 + np.abs(Psi1_history[i, :])**2
-        ax.plot(x / np.pi, total_prob, label=f"t={times[i]:.2f}")
-    ax.set_xlabel("$x$ [$\\pi$]")
-    ax.set_ylabel("$|\\Psi_0|^2 + |\\Psi_1|^2$")
-    ax.set_title("Total probability density (Classical)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # 绘制自旋极化
-    ax = axes[1, 1]
-    for i in range(0, len(times), max(1, len(times)//6)):
-        spin_pol = np.abs(Psi0_history[i, :])**2 - np.abs(Psi1_history[i, :])**2
-        ax.plot(x / np.pi, spin_pol, label=f"t={times[i]:.2f}")
-    ax.set_xlabel("$x$ [$\\pi$]")
-    ax.set_ylabel("$|\\Psi_0|^2 - |\\Psi_1|^2$")
-    ax.set_title("Spin polarization (Classical)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        ax.set_xlabel("$x$ [$\\pi$]", fontsize=11)
+        ax.set_ylabel("$|\\Psi_0|^2 + |\\Psi_1|^2$", fontsize=11)
+        ax.set_title(f"Total probability density: {label}", fontsize=12)
+        ax.legend(fontsize=9, loc='best')
+        ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
+
     plot_path = f"{output_dir}/dirac_classical_results.png"
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-    print(f"Plot saved to: {plot_path}")
-
-    # 保存数据
-    data_path = f"{output_dir}/dirac_classical_data.npz"
-    np.savez(data_path,
-             Psi0=Psi0_history,
-             Psi1=Psi1_history,
-             x=x,
-             t=times,
-             config={'n': n, 'lambda1': lambda1, 'lambda2': lambda2,
-                     'dt': dt, 'num_steps': num_steps})
-    print(f"Data saved to: {data_path}")
+    print(f"\nPlot saved to: {plot_path}")
 
     plt.show()
 
-    return solver, Psi0_history, Psi1_history
+    return results
 
 
 if __name__ == "__main__":
