@@ -87,7 +87,7 @@ def ansatz_dirac(
     conj: bool = False
 ) -> None:
     """
-    构建Dirac方程的ansatz量子电路
+    构建 Dirac 方程的 ansatz 量子电路
     
     电路结构：
     - 第一个量子比特：自旋比特（0或1对应Ψ0或Ψ1）
@@ -104,6 +104,7 @@ def ansatz_dirac(
         parameters: 参数数组，长度为 2*(n+1)*(d+1)
         conj: 是否构建共轭态
     """
+
     n_total = n + 1  # 总量子比特数（1个自旋 + n个位置）
     sign = -1 if conj else 1
 
@@ -119,7 +120,7 @@ def ansatz_dirac(
             # 自旋比特与所有位置比特的CNOT
             for k in range(n):
                 qc.cx(offset, k + 1 + offset)  # 自旋比特控制位置比特
-            
+
             # 位置比特之间的链式CNOT
             for k in range(n - 1):
                 qc.cx(k + 1 + offset, k + 2 + offset)
@@ -134,7 +135,7 @@ def stateFromParameters_dirac(
     d: int
 ) -> Statevector:
     """
-    从参数生成Dirac方程的量子态
+    从参数生成 Dirac 方程的量子态
     
     Args:
         ansatz: ansatz函数
