@@ -30,7 +30,7 @@ from typing import Callable, Union, Tuple, Optional
 from numpy.typing import NDArray
 
 from qiskit_algorithms.optimizers import L_BFGS_B
-from qiskit import QuantumCircuit, transpile, execute, BasicAer
+from qiskit import QuantumCircuit
 from qiskit.quantum_info import Statevector
 from qiskit.circuit.library import QFT
 
@@ -548,28 +548,23 @@ def cost_function_dirac_qiskit(
     U_b_conj = QuantumCircuit(n_total)
     ansatz(U_b_conj, n, d, 0, parameters, conj=True)
 
-    backend = BasicAer.get_backend("statevector_simulator")
-
     # 步骤4：重叠项 Re⟨b|a⟩
     qc_overlap = build_hadamard_test_overlap_circuit(U_a, U_b, n_total)
-    job = execute(qc_overlap, backend)
-    state_ov = np.array(job.result().get_statevector())
+    state_ov = np.array(Statevector.from_instruction(qc_overlap))
     prob_ov = _prob_ancilla_zero_from_statevector(state_ov)
     E_ov = 2.0 * prob_ov - 1.0   # Re⟨b|a⟩
     val_overlap = -2.0 * E_ov
 
     # 步骤5：E_self（QNPU self + CCX + H）
     qc_self = build_qnpu_self_circuit(U_a, U_b_conj, n_total)
-    job_self = execute(qc_self, backend)
-    state_self = np.array(job_self.result().get_statevector())
+    state_self = np.array(Statevector.from_instruction(qc_self))
     prob_self = _prob_ancilla_zero_from_statevector(state_self)
     # 参考 NLSE： (2*prob-1) * (2**n)/(2*pi) 量级的标度，使与经典 E_self 量纲一致
     E_self = (2.0 * prob_self - 1.0) * (2**n) / (2.0 * np.pi)
 
     # 步骤6：E_cross（QNPU cross + CCX + H）
     qc_cross = build_qnpu_cross_circuit(U_a, U_b_conj, n_total)
-    job_cross = execute(qc_cross, backend)
-    state_cross = np.array(job_cross.result().get_statevector())
+    state_cross = np.array(Statevector.from_instruction(qc_cross))
     prob_cross = _prob_ancilla_zero_from_statevector(state_cross)
     E_cross = (2.0 * prob_cross - 1.0) * (2**n) / (2.0 * np.pi)
 
