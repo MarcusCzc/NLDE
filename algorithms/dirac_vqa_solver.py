@@ -589,8 +589,8 @@ def cost_function_dirac_qiskit(
 # ============================================================================
 
 # ----- 量子电路参数 -----
-n = 5       # 位置量子比特数量（2^5 = 32个空间点）
-d = 10      # Ansatz电路深度
+n = 6       # 位置量子比特数量（2^6 = 64个空间点）
+d = 12      # Ansatz电路深度
 
 # ----- 初始条件参数 -----
 x0 = 0.0     # 波包中心
@@ -600,17 +600,17 @@ m = 1.0      # 质量（用于初始条件）
 
 # ----- 非线性系数 -----
 lambda1 = 1.0  # β 非线性系数
-lambda2 = 0.5  # 标量非线性系数
+lambda2 = 1.0  # 标量非线性系数
 
 # ----- 时间演化参数 -----
 time_steps = 50   # 时间步数
 dt = 0.01         # 时间步长
 
 # ----- 优化器参数 -----
-initial_runs = 5   # 第一步的重复次数
-maxiter = 10000    # 最大迭代次数
-maxfun = 50000     # 最大函数评估次数
-ftol = 1e-12       # 收敛容差
+initial_runs = 10   # 第一步的重复次数
+maxiter = 20000    # 最大迭代次数
+maxfun = 100000     # 最大函数评估次数
+ftol = 1e-14       # 收敛容差
 
 # ----- 归一化常数 -----
 N_constant = 1.0  # 归一化常数（对应文档中的N）
@@ -623,10 +623,9 @@ dx = x[1] - x[0]
 Psi0, Psi1 = dirac_initial_condition(x, x0, sigma, k0, m)
 
 # 组合成量子态向量（2^(n+1)维）
-# 前N个元素对应自旋向上，后N个元素对应自旋向下
-initial_condition = np.zeros(2*N, dtype=complex)
-initial_condition[0:N] = Psi0
-initial_condition[N:2*N] = Psi1
+initial_condition = np.empty(2 * N, dtype=complex)
+initial_condition[::2] = Psi0   # 自旋向上 → 偶数索引 → q0 = 0
+initial_condition[1::2] = Psi1  # 自旋向下 → 奇数索引 → q0 = 1
 
 # 归一化量子态
 initial_condition /= np.linalg.norm(initial_condition)
@@ -704,8 +703,8 @@ for i in range(time_steps):
 print("Generating plots...")
 
 # 分离两个自旋分量
-psi_up = psi[:, 0:N]      # 自旋向上分量
-psi_down = psi[:, N:2*N]  # 自旋向下分量
+psi_up = psi[:, ::2]      # 所有偶数索引 → 自旋↑
+psi_down = psi[:, 1::2]   # 所有奇数索引 → 自旋↓
 
 # 创建图形
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
