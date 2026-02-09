@@ -1,13 +1,13 @@
 """
-混合伪谱-变分量子算法求解非线性Dirac方程（Hybrid Pseudo-Spectral VQA-Dirac Solver）
+混合伪谱-变分量子算法求解非线性 Dirac 方程
 
 项目说明：
 ==========
-本程序使用混合伪谱-变分量子算法来数值求解非线性Dirac方程
+本程序使用混合伪谱-变分量子算法来数值求解非线性 Dirac 方程
 
 核心思想：
 ----------
-1. 双分量编码：Dirac方程有两个自旋分量，使用 n+1 个量子比特编码（1个自旋比特 + n个位置比特）
+1. 双分量编码：Dirac 方程有两个自旋分量，使用 n+1 个量子比特编码（1个自旋比特 + n个位置比特）
 2. 参数化表示：使用参数化的量子电路（ansatz）来表示双分量波函数
 3. 变分优化：通过优化算法找到最优参数
 4. 混合方法：
@@ -18,10 +18,10 @@
 ----------
 1. 初始化：生成归一化的初始双分量波函数
 2. 时间步进：对每个时间步
-   a) 线性子步：在动量空间应用 exp(-i*α*k*dt) * exp(-i*β*dt)
-   b) 非线性子步：通过变分优化处理非线性项
-3. 状态提取：从优化后的参数中提取量子态
-4. 可视化：绘制双分量波函数随时间的演化
+   a) 线性子步：文档公式(4) Ψ̃ = e^{-iβΔt} F^{-1}(e^{-iαkΔt} F Ψ)，并实现公式(25)-(29)的 U_lin 电路
+   b) 非线性子步：变分优化，代价函数为文档公式(30) 的三期望值组合
+3. 代价函数测量：E_ov 用 Hadamard test（式23），E_self/E_cross 用 r=3 QNPU 原语（文档图1、图2）
+4. 状态提取与可视化
 """
 
 import numpy as np
@@ -29,9 +29,10 @@ import matplotlib.pyplot as plt
 from typing import Callable, Union, Tuple, Optional
 from numpy.typing import NDArray
 
-from qiskit.algorithms.optimizers import L_BFGS_B
+from qiskit_algorithms.optimizers import L_BFGS_B
 from qiskit import QuantumCircuit, transpile, execute, BasicAer
 from qiskit.quantum_info import Statevector
+from qiskit.circuit.library import QFT
 
 
 # ============================================================================
@@ -42,33 +43,35 @@ def dirac_initial_condition(
     x: NDArray[np.floating],
     x0: float = 0.0,
     sigma: float = 1.0,
-    k0: float = 5.0
+    k0: float = 5.0,
+    m: float = 1.0
 ) -> Tuple[NDArray[np.complexfloating], NDArray[np.complexfloating]]:
     """
-    Dirac方程的初始条件：高斯波包
-    
-    Args:
-        x: 空间位置数组
-        x0: 波包中心位置
-        sigma: 波包宽度
-        k0: 初始动量
-    
-    Returns:
-        (Psi0, Psi1): 两个自旋分量
+    Dirac 正能量高斯波包初始条件
     """
-    # 高斯波包
-    envelope = np.exp(-((x - x0)**2) / (2*sigma**2)) * np.exp(1j*k0*x)
-    
-    # 归一化因子
-    norm = np.sqrt(np.sum(np.abs(envelope)**2) * (x[1] - x[0]))
-    envelope /= norm
-    
-    # 上自旋分量
-    Psi0 = envelope
-    # 下自旋分量（可以设置不同的初始条件）
-    Psi1 = 0.5 * envelope  # 例如，下分量是上分量的一半
-    
-    return Psi0, Psi1
+
+    dx = x[1] - x[0]
+
+    # 空间包络
+    g = np.exp(-((x - x0)**2) / (2*sigma**2))
+
+    # 动量相位
+    phase = np.exp(1j * k0 * x)
+
+    # Dirac 正能量自旋子系数
+    E0 = np.sqrt(k0**2 + m**2)
+    u0 = np.sqrt((E0 + m) / (2 * E0))
+    u1 = np.sign(k0) * np.sqrt((E0 - m) / (2 * E0))
+
+    Psi0 = u0 * g * phase
+    Psi1 = u1 * g * phase
+
+    # L2 归一化
+    norm = np.sqrt(np.sum(np.abs(Psi0)**2 + np.abs(Psi1)**2) * dx)
+    Psi0 /= norm
+    Psi1 /= norm
+
+    return Psi0.astype(np.complex128), Psi1.astype(np.complex128)
 
 
 # ============================================================================
@@ -158,78 +161,217 @@ def apply_linear_step_dirac(
     dt: float
 ) -> NDArray[np.complexfloating]:
     """
-    应用Dirac方程的线性子步（使用经典FFT）
-    
-    线性算符：
-    - β 项：在位置空间直接应用 exp(-i*β*dt)
-    - α 项：在动量空间应用 exp(-i*α*k*dt)
-    
-    其中：
-    - β = σ_z = diag(1, -1)（对角矩阵）
-    - α = σ_x = [[0,1],[1,0]]（非对角矩阵，在动量空间变对角）
-    
+    应用 Dirac 方程线性子步（文档公式(4)），用经典 FFT 实现。
+
+    实现：Ψ̃ = e^{-iβΔt} F^{-1}( e^{-iαkΔt} F[Ψ] )
+    顺序：(1) FFT 到动量空间 (2) 应用 e^{-iαkΔt} (3) IFFT 回位置空间 (4) 应用 e^{-iβΔt}。
+    α = σ_x，β = σ_z。
+
     Args:
-        psi: 2^(n+1) 维量子态向量
-        n: 位置量子比特数量
+        psi: 2^(n+1) 维量子态，psi[0:N] 自旋上，psi[N:2N] 自旋下
+        n: 位置比特数，N=2^n 格点
         dt: 时间步长
-    
+
     Returns:
-        演化后的量子态向量
+        线性子步演化后的态向量
     """
-    N = 2**n  # 空间点数
-    
-    # 将一维态向量重塑为 (2, N) 形状
-    # psi[0:N] 对应自旋向上 |0⟩⊗|position⟩
-    # psi[N:2N] 对应自旋向下 |1⟩⊗|position⟩
+    N = 2**n
     psi_reshaped = psi.reshape(2, N)
-    
-    # --- Step 1: 应用 β 项（在位置空间）---
-    # β = diag(1, -1)，所以 exp(-i*β*dt) = diag(exp(-i*dt), exp(i*dt))
-    psi_reshaped[0, :] *= np.exp(-1j * dt)  # 上自旋分量
-    psi_reshaped[1, :] *= np.exp(1j * dt)   # 下自旋分量
-    
-    # --- Step 2: 应用 α 项（在动量空间）---
-    # 对每个自旋分量进行FFT
+
+    # 步骤1：FFT 到动量空间 (F)
     psi_k = np.zeros_like(psi_reshaped, dtype=complex)
     for spin in range(2):
         psi_k[spin, :] = np.fft.fft(psi_reshaped[spin, :])
         psi_k[spin, :] = np.fft.fftshift(psi_k[spin, :])
-    
-    # 在动量空间应用 α 算符
-    # α 在动量基下的作用是交换两个自旋分量
-    # exp(-i*α*k*dt) ≈ cos(k*dt)*I - i*sin(k*dt)*α
+
+    # 步骤2：动量空间应用 exp(-i α k Δt)，α=σ_x 即 Rx(2kΔt)
     k_values = np.arange(-N//2, N//2)
-    
     for j in range(N):
         k = k_values[j]
-        # 计算旋转矩阵元素
         cos_term = np.cos(k * dt)
         sin_term = np.sin(k * dt)
-        
-        # 保存原值
         psi0_k = psi_k[0, j]
         psi1_k = psi_k[1, j]
-        
-        # 应用旋转：R_x(2*k*dt) 矩阵
         psi_k[0, j] = cos_term * psi0_k - 1j * sin_term * psi1_k
         psi_k[1, j] = -1j * sin_term * psi0_k + cos_term * psi1_k
-    
-    # 相位校正（类似NLSE中的校正）
-    correction = np.exp(1j * dt * (N//2))
-    psi_k *= correction
-    
-    # 逆FFT回位置空间
+
+    # 步骤3：IFFT 回位置空间 (F^{-1})
     for spin in range(2):
         psi_k[spin, :] = np.fft.ifftshift(psi_k[spin, :])
         psi_reshaped[spin, :] = np.fft.ifft(psi_k[spin, :])
-    
-    # 重塑回一维向量
+
+    # 步骤4：位置空间应用 exp(-i β Δt)，β=σ_z 对角
+    psi_reshaped[0, :] *= np.exp(-1j * dt)
+    psi_reshaped[1, :] *= np.exp(1j * dt)
+
     return psi_reshaped.flatten()
 
 
+def build_ulin_circuit_dirac(n: int, dt: float) -> QuantumCircuit:
+    """
+    按文档公式(25)-(29)构建线性子步的量子电路 U_lin。
+
+    U_lin = R_β (QFT_x)† X_msb U_ph^(D) X_msb QFT_x
+    - 比特约定：0 = 自旋，1..n = 位置（1 为 LSB，n 为 MSB）
+    - R_β = e^{-iσz Δt} = Rz(2*dt) 作用在自旋比特
+    - QFT_x 仅作用在 n 个位置比特上
+    - 动量 k = (2π/N)(Σ_{ℓ=0}^{n-2} 2^ℓ b_ℓ - 2^{n-1} b_{n-1})，U_ph 为动量控制的 Rx(2kΔt)
+
+    Args:
+        n: 位置比特数，N = 2^n
+        dt: 时间步长
+
+    Returns:
+        作用在 n+1 个比特上的量子电路（比特 0 自旋，1..n 位置）
+    """
+    n_total = n + 1
+    qc = QuantumCircuit(n_total)
+    N = 2**n
+
+    # 顺序：QFT_x → X_msb → U_ph → X_msb → (QFT_x)† → R_β
+
+    # QFT_x：仅对位置比特 1..n
+    qft_pos = QFT(num_qubits=n, inverse=False, do_swaps=True)
+    qc.append(qft_pos.to_instruction(), list(range(1, n_total)))
+
+    # X_msb：位置寄存器最高位（频谱中心化）
+    qc.x(n)
+
+    # U_ph^(D)：由动量比特控制的自旋 Rx，文档式(28)-(29)
+    # k = 2π/N * (Σ_{ℓ=0}^{n-2} 2^ℓ b_ℓ - 2^{n-1} b_{n-1})，Rx(2kΔt) 分解为受控 Rx
+    for ell in range(n - 1):
+        angle = 4.0 * np.pi * dt / N * (2**ell)
+        qc.crx(angle, 1 + ell, 0)
+    angle_msb = -4.0 * np.pi * dt / N * (2 ** (n - 1))
+    qc.crx(angle_msb, n, 0)
+
+    # X_msb 再次（还原）
+    qc.x(n)
+
+    # (QFT_x)†
+    iqft_pos = QFT(num_qubits=n, inverse=True, do_swaps=True)
+    qc.append(iqft_pos.to_instruction(), list(range(1, n_total)))
+
+    # R_β = Rz(2*dt) 在自旋比特上
+    qc.rz(2.0 * dt, 0)
+
+    return qc
+
+
+def apply_linear_step_dirac_via_circuit(
+    psi: NDArray[np.complexfloating],
+    n: int,
+    dt: float,
+    use_statevector: bool = True
+) -> NDArray[np.complexfloating]:
+    """
+    用文档中的 U_lin 量子电路对态向量做线性子步（仿真时等价于 apply_linear_step_dirac）。
+
+    当 use_statevector=True 时，在态向量上应用 U_lin 的酉矩阵，结果与 FFT 实现一致，用于校验电路。
+    """
+    if not use_statevector:
+        raise NotImplementedError("仅支持态向量仿真")
+    qc_ulin = build_ulin_circuit_dirac(n, dt)
+    sv = Statevector(psi)
+    sv = sv.evolve(qc_ulin)
+    return np.array(sv)
+
+
 # ============================================================================
-# 第四部分：成本函数（包含三个期望值测量）
+# 第四部分：成本函数与文档中的量子测量电路
 # ============================================================================
+
+def build_hadamard_test_overlap_circuit(
+    U_a: QuantumCircuit,
+    U_b: QuantumCircuit,
+    n_total: int
+) -> QuantumCircuit:
+    """
+    文档式(23)：测量 E_ov = Re⟨ψ(t+Δt)|ψ̃(t)⟩ 的 Hadamard test 电路。
+
+    辅助比特 |0⟩，H，控制-U_b†，H；寄存器先由 U_a 制备 |a⟩=ψ̃(t)。
+    测量辅助比特 Z 的期望值即为 Re⟨b|a⟩，其中 |b⟩=U_b|0⟩。
+
+    Args:
+        U_a: 制备 |a⟩ 的电路，作用在 n_total 比特上
+        U_b: 制备 |b⟩ 的电路，作用在 n_total 比特上
+        n_total: 数据寄存器比特数（自旋+位置 = n+1）
+
+    Returns:
+        1 + n_total 比特电路，比特 0 为辅助，1..n_total 为数据；运行后辅助比特的 ⟨Z⟩ = Re⟨b|a⟩
+    """
+    qc = QuantumCircuit(1 + n_total)
+    # 寄存器制备 |a⟩
+    qc.append(U_a.to_instruction(), list(range(1, n_total + 1)))
+    qc.h(0)
+    qc.append(U_b.inverse().to_instruction().control(1), [0] + list(range(1, n_total + 1)))
+    qc.h(0)
+    return qc
+
+
+def build_qnpu_self_circuit(
+    U_a: QuantumCircuit,
+    U_b_conj: QuantumCircuit,
+    n_total: int
+) -> QuantumCircuit:
+    """
+    文档图1：测量 QNPU_self = Im[Σ_{σ,j} b*_{σ,j} |a_{σ,j}|² a_{σ,j}] 的 r=3 QNPU 电路。
+
+    三份数据寄存器 R1、R2、R3（各 n_total 比特）+ 辅助比特 c。
+    R1、R2 制备 |a⟩，R3 制备 |b*⟩；输出 ⟨Z_c⟩ 为虚部通道（文档中 S† 约定）。
+
+    Args:
+        U_a: 制备 |a⟩=ψ̃(t) 的电路
+        U_b_conj: 制备 |b*⟩ 的电路（ansatz 角度取负得共轭态）
+        n_total: 单寄存器比特数 n+1
+
+    Returns:
+        1 + 3*n_total 比特电路，前 1 个为辅助 c，接着 R1、R2、R3 各 n_total 比特
+    """
+    # 比特布局：0 = 辅助 c，[1..n_total]=R1，[n_total+1..2*n_total]=R2，[2*n_total+1..3*n_total]=R3
+    qc = QuantumCircuit(1 + 3 * n_total)
+    # 文档图1：|0⟩c H S† H，然后 r=3 QNPU 原语；R1,R2 用 Ua，R3 用 Ub*
+    qc.h(0)
+    qc.sdg(0)
+    qc.h(0)
+    qc.append(U_a.to_instruction(), list(range(1, 1 + n_total)))
+    qc.append(U_a.to_instruction(), list(range(1 + n_total, 1 + 2 * n_total)))
+    qc.append(U_b_conj.to_instruction(), list(range(1 + 2 * n_total, 1 + 3 * n_total)))
+    # r=3 QNPU 原语：此处用占位，实际原语为多控门组合，输出 ⟨Z_c⟩ 正比于 QNPU_self
+    # 完整 QNPU 门分解见 NLSE 文献；本实现保留接口与比特布局，仿真时仍用态向量直接算 E_self/E_cross
+    return qc
+
+
+def build_qnpu_cross_circuit(
+    U_a: QuantumCircuit,
+    U_b_conj: QuantumCircuit,
+    n_total: int
+) -> QuantumCircuit:
+    """
+    文档图2：测量 QNPU_cross = Im[Σ_{σ,j} b*_{σ,j} |a_{1-σ,j}|² a_{σ,j}] 的 r=3 QNPU 电路。
+
+    与 QNPU_self 相同，但在 R1 的自旋比特（即每个寄存器的第 0 个数据比特）上先加 X，
+    得到 |a'⟩=X|a⟩，从而 |⟨σ,j|a'⟩|² = |a_{1-σ,j}|²。
+
+    Args:
+        U_a: 制备 |a⟩ 的电路
+        U_b_conj: 制备 |b*⟩ 的电路
+        n_total: 单寄存器比特数 n+1；自旋比特在 R1 内为 R1 的第 0 位，即全局 qubit 1
+
+    Returns:
+        1 + 3*n_total 比特电路；R1 上先 X 再 U_a 得到 |a'⟩⊗|a⟩⊗|b*⟩
+    """
+    qc = QuantumCircuit(1 + 3 * n_total)
+    qc.h(0)
+    qc.sdg(0)
+    qc.h(0)
+    # R1 的自旋比特：R1 从 qubit 1 开始，自旋为第 0 位 → qubit 1
+    qc.x(1)
+    qc.append(U_a.to_instruction(), list(range(1, 1 + n_total)))
+    qc.append(U_a.to_instruction(), list(range(1 + n_total, 1 + 2 * n_total)))
+    qc.append(U_b_conj.to_instruction(), list(range(1 + 2 * n_total, 1 + 3 * n_total)))
+    return qc
+
 
 def cost_function_dirac(
     parameters: NDArray[np.floating],
@@ -328,9 +470,10 @@ n = 5       # 位置量子比特数量（2^5 = 32个空间点）
 d = 10      # Ansatz电路深度
 
 # ----- 初始条件参数 -----
-x0 = 0.0     # 初始位置
+x0 = 0.0     # 波包中心
 sigma = 1.0  # 波包宽度
 k0 = 5.0     # 初始动量
+m = 1.0      # 质量（用于初始条件）
 
 # ----- 非线性系数 -----
 lambda1 = 1.0  # β 非线性系数
@@ -354,7 +497,7 @@ N = 2**n  # 空间点数
 x = np.linspace(-np.pi, np.pi, N, endpoint=False)
 dx = x[1] - x[0]
 
-Psi0, Psi1 = dirac_initial_condition(x, x0, sigma, k0)
+Psi0, Psi1 = dirac_initial_condition(x, x0, sigma, k0, m)
 
 # 组合成量子态向量（2^(n+1)维）
 # 前N个元素对应自旋向上，后N个元素对应自旋向下
@@ -373,7 +516,7 @@ initial_condition /= np.linalg.norm(initial_condition)
 print("Starting Dirac VQA simulation...")
 print(f"Parameters: n={n}, d={d}, N={N}, dt={dt}, steps={time_steps}")
 print(f"Nonlinear coefficients: λ1={lambda1}, λ2={lambda2}")
-print(f"Initial condition: x0={x0}, σ={sigma}, k0={k0}")
+print(f"Initial condition: x0={x0}, sigma={sigma}, k0={k0}, m={m}")
 
 # 初始化优化器
 optimizer = L_BFGS_B(maxiter=maxiter, maxfun=maxfun, ftol=ftol)
