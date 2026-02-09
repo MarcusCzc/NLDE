@@ -27,6 +27,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Callable, Union, Tuple, Optional
+from numpy._core.numeric import False_
 from numpy.typing import NDArray
 
 from qiskit_algorithms.optimizers import L_BFGS_B
@@ -159,19 +160,21 @@ def stateFromParameters_dirac(
 def apply_linear_step_dirac(
     psi: NDArray[np.complexfloating],
     n: int,
-    dt: float
+    dt: float,
+    m: float = 1.0
 ) -> NDArray[np.complexfloating]:
     """
-    应用 Dirac 方程线性子步（文档公式(4)），用经典 FFT 实现。
+    应用 Dirac 方程线性子步（文档公式(4)），用经典 FFT 实现
 
-    实现：Ψ̃ = e^{-iβΔt} F^{-1}( e^{-iαkΔt} F[Ψ] )
-    顺序：(1) FFT 到动量空间 (2) 应用 e^{-iαkΔt} (3) IFFT 回位置空间 (4) 应用 e^{-iβΔt}。
-    α = σ_x，β = σ_z。
+    实现：Ψ̃ = e^{-iβmΔt} F^{-1}( e^{-iαkΔt} F[Ψ] )
+    顺序：(1) FFT 到动量空间 (2) 应用 e^{-iαkΔt} (3) IFFT 回位置空间 (4) 应用 e^{-iβmΔt}
+    α = σ_x，β = σ_z
 
     Args:
         psi: 2^(n+1) 维量子态，psi[0:N] 自旋上，psi[N:2N] 自旋下
         n: 位置比特数，N=2^n 格点
         dt: 时间步长
+        m: 质量
 
     Returns:
         线性子步演化后的态向量
@@ -201,26 +204,27 @@ def apply_linear_step_dirac(
         psi_k[spin, :] = np.fft.ifftshift(psi_k[spin, :])
         psi_reshaped[spin, :] = np.fft.ifft(psi_k[spin, :])
 
-    # 步骤4：位置空间应用 exp(-i β Δt)，β=σ_z 对角
-    psi_reshaped[0, :] *= np.exp(-1j * dt)
-    psi_reshaped[1, :] *= np.exp(1j * dt)
+    # 步骤4：位置空间应用 exp(-i β m Δt)，β=σ_z 对角
+    psi_reshaped[0, :] *= np.exp(-1j * m * dt)
+    psi_reshaped[1, :] *= np.exp(1j * m * dt)
 
     return psi_reshaped.flatten()
 
 
-def build_ulin_circuit_dirac(n: int, dt: float) -> QuantumCircuit:
+def build_ulin_circuit_dirac(n: int, dt: float, m: float = 1.0) -> QuantumCircuit:
     """
-    按文档公式(25)-(29)构建线性子步的量子电路 U_lin。
+    按文档公式 (25)-(29) 构建线性子步的量子电路 U_lin
 
     U_lin = R_β (QFT_x)† X_msb U_ph^(D) X_msb QFT_x
     - 比特约定：0 = 自旋，1..n = 位置（1 为 LSB，n 为 MSB）
-    - R_β = e^{-iσz Δt} = Rz(2*dt) 作用在自旋比特
+    - R_β = e^{-iσz mΔt} = Rz(2*m*dt) 作用在自旋比特
     - QFT_x 仅作用在 n 个位置比特上
     - 动量 k = (2π/N)(Σ_{ℓ=0}^{n-2} 2^ℓ b_ℓ - 2^{n-1} b_{n-1})，U_ph 为动量控制的 Rx(2kΔt)
 
     Args:
         n: 位置比特数，N = 2^n
         dt: 时间步长
+        m: 质量
 
     Returns:
         作用在 n+1 个比特上的量子电路（比特 0 自旋，1..n 位置）
@@ -232,7 +236,7 @@ def build_ulin_circuit_dirac(n: int, dt: float) -> QuantumCircuit:
     # 顺序：QFT_x → X_msb → U_ph → X_msb → (QFT_x)† → R_β
 
     # QFT_x：仅对位置比特 1..n
-    qft_pos = QFT(num_qubits=n, inverse=False, do_swaps=True)
+    qft_pos = QFT(num_qubits=n, inverse=False, do_swaps=False)
     qc.append(qft_pos.to_instruction(), list(range(1, n_total)))
 
     # X_msb：位置寄存器最高位（频谱中心化）
@@ -250,11 +254,11 @@ def build_ulin_circuit_dirac(n: int, dt: float) -> QuantumCircuit:
     qc.x(n)
 
     # (QFT_x)†
-    iqft_pos = QFT(num_qubits=n, inverse=True, do_swaps=True)
+    iqft_pos = QFT(num_qubits=n, inverse=True, do_swaps=False)
     qc.append(iqft_pos.to_instruction(), list(range(1, n_total)))
 
-    # R_β = Rz(2*dt) 在自旋比特上
-    qc.rz(2.0 * dt, 0)
+    # R_β = e^{-iσz mΔt}，Rz(2*m*dt) 在自旋比特上
+    qc.rz(2.0 * m * dt, 0)
 
     return qc
 
@@ -263,16 +267,17 @@ def apply_linear_step_dirac_via_circuit(
     psi: NDArray[np.complexfloating],
     n: int,
     dt: float,
-    use_statevector: bool = True
+    use_statevector: bool = True,
+    m: float = 1.0
 ) -> NDArray[np.complexfloating]:
     """
-    用文档中的 U_lin 量子电路对态向量做线性子步（仿真时等价于 apply_linear_step_dirac）。
+    用文档中的 U_lin 量子电路对态向量做线性子步（仿真时等价于 apply_linear_step_dirac）
 
-    当 use_statevector=True 时，在态向量上应用 U_lin 的酉矩阵，结果与 FFT 实现一致，用于校验电路。
+    当 use_statevector=True 时，在态向量上应用 U_lin 的酉矩阵，结果与 FFT 实现一致，用于校验电路
     """
     if not use_statevector:
         raise NotImplementedError("仅支持态向量仿真")
-    qc_ulin = build_ulin_circuit_dirac(n, dt)
+    qc_ulin = build_ulin_circuit_dirac(n, dt, m)
     sv = Statevector(psi)
     sv = sv.evolve(qc_ulin)
     return np.array(sv)
@@ -385,7 +390,8 @@ def cost_function_dirac(
     dt: float,
     N_constant: float,
     dx: float,
-    startFromStateVector: bool = False
+    startFromStateVector: bool = False,
+    m: float = 1.0
 ) -> float:
     """
     Dirac方程的成本函数（对应公式30）
@@ -409,6 +415,7 @@ def cost_function_dirac(
         N_constant: 归一化常数（通常为1）
         dx: 空间步长
         startFromStateVector: 是否从状态向量开始
+        m: 质量（线性子步用）
     
     Returns:
         成本函数值
@@ -426,7 +433,7 @@ def cost_function_dirac(
     psi = np.array(stateFromParameters_dirac(ansatz, parameters, n, d))
     
     # ===== 步骤3：应用线性子步 =====
-    psi_tilde = apply_linear_step_dirac(psi_0.copy(), n, dt)
+    psi_tilde = apply_linear_step_dirac(psi_0.copy(), n, dt, m)
     
     # ===== 步骤4：计算三个期望值 =====
     
@@ -529,7 +536,7 @@ parameters = np.zeros((time_steps, 2 * n_total * (d + 1)))
 # ===== 第一步：从初始条件开始 =====
 cost_function = lambda x: cost_function_dirac(
     x, initial_condition, ansatz_dirac, n, d,
-    lambda1, lambda2, dt, N_constant, dx, True
+    lambda1, lambda2, dt, N_constant, dx, True, m
 )
 
 fvalue_opt = float("Inf")
@@ -552,7 +559,7 @@ for i in range(1, time_steps):
     
     cost_function = lambda x: cost_function_dirac(
         x, parameters[i-1, :], ansatz_dirac, n, d,
-        lambda1, lambda2, dt, N_constant, dx, False
+        lambda1, lambda2, dt, N_constant, dx, False, m
     )
     
     sol = optimizer.minimize(cost_function, parameters[i-1, :])
