@@ -27,7 +27,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Callable, Union, Tuple, Optional
-from numpy._core.numeric import False_
 from numpy.typing import NDArray
 
 from qiskit_algorithms.optimizers import L_BFGS_B
@@ -293,10 +292,10 @@ def build_hadamard_test_overlap_circuit(
     n_total: int
 ) -> QuantumCircuit:
     """
-    文档式(23)：测量 E_ov = Re⟨ψ(t+Δt)|ψ̃(t)⟩ 的 Hadamard test 电路。
+    文档式(23)：测量 E_ov = Re⟨ψ(t+Δt)|ψ̃(t)⟩ 的 Hadamard test 电路
 
-    辅助比特 |0⟩，H，控制-U_b†，H；寄存器先由 U_a 制备 |a⟩=ψ̃(t)。
-    测量辅助比特 Z 的期望值即为 Re⟨b|a⟩，其中 |b⟩=U_b|0⟩。
+    辅助比特 |0⟩，H，控制-U_b†，H；寄存器先由 U_a 制备 |a⟩=ψ̃(t)
+    测量辅助比特 Z 的期望值即为 Re⟨b|a⟩，其中 |b⟩=U_b|0⟩
 
     Args:
         U_a: 制备 |a⟩ 的电路，作用在 n_total 比特上
@@ -321,10 +320,10 @@ def build_qnpu_self_circuit(
     n_total: int
 ) -> QuantumCircuit:
     """
-    文档图1：测量 QNPU_self = Im[Σ_{σ,j} b*_{σ,j} |a_{σ,j}|² a_{σ,j}] 的 r=3 QNPU 电路。
+    文档图1：测量 QNPU_self = Im[Σ_{σ,j} b*_{σ,j} |a_{σ,j}|² a_{σ,j}] 的 r=3 QNPU 电路
 
-    三份数据寄存器 R1、R2、R3（各 n_total 比特）+ 辅助比特 c。
-    R1、R2 制备 |a⟩，R3 制备 |b*⟩；输出 ⟨Z_c⟩ 为虚部通道（文档中 S† 约定）。
+    三份数据寄存器 R1、R2、R3（各 n_total 比特）+ 辅助比特 c
+    R1、R2 制备 |a⟩，R3 制备 |b*⟩；输出 ⟨Z_c⟩ 为虚部通道（文档中 S† 约定）
 
     Args:
         U_a: 制备 |a⟩=ψ̃(t) 的电路
@@ -343,8 +342,12 @@ def build_qnpu_self_circuit(
     qc.append(U_a.to_instruction(), list(range(1, 1 + n_total)))
     qc.append(U_a.to_instruction(), list(range(1 + n_total, 1 + 2 * n_total)))
     qc.append(U_b_conj.to_instruction(), list(range(1 + 2 * n_total, 1 + 3 * n_total)))
-    # r=3 QNPU 原语：此处用占位，实际原语为多控门组合，输出 ⟨Z_c⟩ 正比于 QNPU_self
-    # 完整 QNPU 门分解见 NLSE 文献；本实现保留接口与比特布局，仿真时仍用态向量直接算 E_self/E_cross
+    qc.barrier()
+    for i in range(n_total):
+        qc.ccx(0, 1 + i, n_total + 1 + i)   # R1[i] -> R2[i] when ancilla=1
+        qc.ccx(0, 1 + i, 2 * n_total + 1 + i)  # R1[i] -> R3[i] when ancilla=1
+    qc.barrier()
+    qc.h(0)
     return qc
 
 
@@ -354,10 +357,10 @@ def build_qnpu_cross_circuit(
     n_total: int
 ) -> QuantumCircuit:
     """
-    文档图2：测量 QNPU_cross = Im[Σ_{σ,j} b*_{σ,j} |a_{1-σ,j}|² a_{σ,j}] 的 r=3 QNPU 电路。
+    文档图2：测量 QNPU_cross = Im[Σ_{σ,j} b*_{σ,j} |a_{1-σ,j}|² a_{σ,j}] 的 r=3 QNPU 电路
 
     与 QNPU_self 相同，但在 R1 的自旋比特（即每个寄存器的第 0 个数据比特）上先加 X，
-    得到 |a'⟩=X|a⟩，从而 |⟨σ,j|a'⟩|² = |a_{1-σ,j}|²。
+    得到 |a'⟩=X|a⟩，从而 |⟨σ,j|a'⟩|² = |a_{1-σ,j}|²
 
     Args:
         U_a: 制备 |a⟩ 的电路
@@ -365,17 +368,23 @@ def build_qnpu_cross_circuit(
         n_total: 单寄存器比特数 n+1；自旋比特在 R1 内为 R1 的第 0 位，即全局 qubit 1
 
     Returns:
-        1 + 3*n_total 比特电路；R1 上先 X 再 U_a 得到 |a'⟩⊗|a⟩⊗|b*⟩
+        1 + 3*n_total 比特电路；R1 上先 U_a 再 X 得到 |a'⟩⊗|a⟩⊗|b*⟩
     """
     qc = QuantumCircuit(1 + 3 * n_total)
     qc.h(0)
     qc.sdg(0)
     qc.h(0)
+    qc.append(U_a.to_instruction(), list(range(1, 1 + n_total)))
     # R1 的自旋比特：R1 从 qubit 1 开始，自旋为第 0 位 → qubit 1
     qc.x(1)
-    qc.append(U_a.to_instruction(), list(range(1, 1 + n_total)))
     qc.append(U_a.to_instruction(), list(range(1 + n_total, 1 + 2 * n_total)))
     qc.append(U_b_conj.to_instruction(), list(range(1 + 2 * n_total, 1 + 3 * n_total)))
+    qc.barrier()
+    for i in range(n_total):
+        qc.ccx(0, 1 + i, n_total + 1 + i)
+        qc.ccx(0, 1 + i, 2 * n_total + 1 + i)
+    qc.barrier()
+    qc.h(0)
     return qc
 
 
@@ -394,7 +403,7 @@ def cost_function_dirac(
     m: float = 1.0
 ) -> float:
     """
-    Dirac方程的成本函数（对应公式30）
+    Dirac 方程的成本函数（对应公式30）
     
     C = -2*E_ov + (dt*N/dx) * [(λ1+λ2)*E_self + (λ2-λ1)*E_cross]
     
@@ -467,6 +476,112 @@ def cost_function_dirac(
     )
     
     return overlap_term + nonlinear_term
+
+
+def _prob_ancilla_zero_from_statevector(statevector: np.ndarray) -> float:
+    """
+    从态向量计算辅助比特（qubit 0）为 |0⟩ 的概率。Qiskit 小端序，qubit 0 为 LSB
+    """
+    return float(np.sum(np.abs(statevector[::2]) ** 2))
+
+
+def cost_function_dirac_qiskit(
+    parameters: NDArray[np.floating],
+    parameters_0: Union[NDArray[np.floating], NDArray[np.complexfloating]],
+    ansatz: Callable,
+    n: int,
+    d: int,
+    lambda1: float,
+    lambda2: float,
+    dt: float,
+    N_constant: float,
+    dx: float,
+    startFromStateVector: bool = False,
+    m: float = 1.0,
+    return_circuits: bool = False
+) -> Union[float, Tuple[float, QuantumCircuit, QuantumCircuit, QuantumCircuit]]:
+    """
+    完全用 Qiskit 电路实现的 Dirac 成本函数（参考 NLSE 的 cost_function_qiskit）
+
+    用量子电路直接计算重叠项与非线性项（E_self、E_cross），
+    线性子步仍用经典 FFT 得到 ψ̃，再通过 prepare_state 注入电路
+
+    实现要点：
+    1. 重叠项 E_ov：Hadamard test，Re⟨ψ|ψ̃⟩，辅助比特 ⟨Z⟩ = 2*P(0)-1
+    2. E_self：三寄存器 QNPU 电路（R1=R2=|a⟩, R3=|b*⟩）+ CCX 复制 + H(0)，Im 通道由 S† 实现
+    3. E_cross：同上，但 R1 自旋比特先 X，得到 |a'⟩ 使 |⟨σ,j|a'⟩|² = |a_{1-σ,j}|²
+
+    Args:
+        parameters: 当前时刻参数
+        parameters_0: 前一时刻参数或状态向量
+        ansatz: ansatz 函数（如 ansatz_dirac）
+        n: 位置比特数
+        d: 电路深度
+        lambda1, lambda2: 非线性系数
+        dt: 时间步长
+        N_constant: 归一化常数
+        dx: 空间步长
+        startFromStateVector: 若 True 则 parameters_0 为状态向量
+        m: 质量
+        return_circuits: 若 True 则返回 (cost, qc_overlap, qc_self, qc_cross)
+
+    Returns:
+        成本函数值，或 (成本值, 重叠电路, self 电路, cross 电路)
+    """
+    N = 2**n
+    n_total = n + 1
+
+    # 步骤1：前一时刻态并做线性子步得 ψ̃
+    if startFromStateVector:
+        psi_0 = np.asarray(parameters_0, dtype=complex)
+    else:
+        psi_0 = np.array(stateFromParameters_dirac(ansatz, parameters_0, n, d))
+    psi_tilde = apply_linear_step_dirac(psi_0.copy(), n, dt, m)
+
+    # 步骤2：制备 |a⟩=ψ̃ 的电路（用于重叠与 QNPU）
+    U_a = QuantumCircuit(n_total)
+    U_a.prepare_state(psi_tilde, list(range(n_total)))
+
+    # 步骤3：试验态 |b⟩ 与共轭 |b*⟩ 的电路
+    U_b = QuantumCircuit(n_total)
+    ansatz(U_b, n, d, 0, parameters)
+    U_b_conj = QuantumCircuit(n_total)
+    ansatz(U_b_conj, n, d, 0, parameters, conj=True)
+
+    backend = BasicAer.get_backend("statevector_simulator")
+
+    # 步骤4：重叠项 Re⟨b|a⟩
+    qc_overlap = build_hadamard_test_overlap_circuit(U_a, U_b, n_total)
+    job = execute(qc_overlap, backend)
+    state_ov = np.array(job.result().get_statevector())
+    prob_ov = _prob_ancilla_zero_from_statevector(state_ov)
+    E_ov = 2.0 * prob_ov - 1.0   # Re⟨b|a⟩
+    val_overlap = -2.0 * E_ov
+
+    # 步骤5：E_self（QNPU self + CCX + H）
+    qc_self = build_qnpu_self_circuit(U_a, U_b_conj, n_total)
+    job_self = execute(qc_self, backend)
+    state_self = np.array(job_self.result().get_statevector())
+    prob_self = _prob_ancilla_zero_from_statevector(state_self)
+    # 参考 NLSE： (2*prob-1) * (2**n)/(2*pi) 量级的标度，使与经典 E_self 量纲一致
+    E_self = (2.0 * prob_self - 1.0) * (2**n) / (2.0 * np.pi)
+
+    # 步骤6：E_cross（QNPU cross + CCX + H）
+    qc_cross = build_qnpu_cross_circuit(U_a, U_b_conj, n_total)
+    job_cross = execute(qc_cross, backend)
+    state_cross = np.array(job_cross.result().get_statevector())
+    prob_cross = _prob_ancilla_zero_from_statevector(state_cross)
+    E_cross = (2.0 * prob_cross - 1.0) * (2**n) / (2.0 * np.pi)
+
+    # 步骤7：组合成本
+    nonlinear_term = (dt * N_constant / dx) * (
+        (lambda2 + lambda1) * E_self + (lambda2 - lambda1) * E_cross
+    )
+    cost = val_overlap + nonlinear_term
+
+    if return_circuits:
+        return cost, qc_overlap, qc_self, qc_cross
+    return cost
 
 
 # ============================================================================
